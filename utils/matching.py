@@ -10,13 +10,14 @@ BLOOD_COMPATIBILITY = {
 }
 
 
+
 def find_matching_donors(conn, request_id):
 
     cursor = conn.cursor()
 
     cursor.execute(
         """
-        SELECT blood_group, city
+        SELECT blood_group, city, state
         FROM blood_requests
         WHERE request_id = %s
         """,
@@ -29,19 +30,20 @@ def find_matching_donors(conn, request_id):
         cursor.close()
         return []
 
-    blood_group, city = request
+    blood_group, city, state = request
 
     compatible_groups = BLOOD_COMPATIBILITY[blood_group]
 
     cursor.execute(
         """
-        SELECT donor_id, name, blood_group, city
+        SELECT donor_id, name, blood_group, city, state
         FROM donors
         WHERE blood_group = ANY(%s)
         AND LOWER(TRIM(city)) = LOWER(TRIM(%s))
+        AND LOWER(TRIM(state)) = LOWER(TRIM(%s))
         AND available = TRUE
         """,
-        (compatible_groups, city)
+        (compatible_groups, city, state)
     )
 
     donors = cursor.fetchall()

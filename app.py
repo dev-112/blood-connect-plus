@@ -1,8 +1,40 @@
 import matplotlib.pyplot as plt
 import streamlit as st
-from database import get_connection
+from database import get_connection, get_engine
 import pandas as pd
 from utils.matching import find_matching_donors
+from country_state_city import State, City
+
+st.set_page_config(
+    page_title="Blood Connect+",
+    page_icon="🩸",
+    layout="wide"
+)
+
+@st.cache_data
+def get_indian_states():
+    return sorted(
+        State.get_states_of_country("IN"),
+        key=lambda state: state.name
+    )
+
+
+@st.cache_data
+def get_indian_cities(state_code):
+    cities = City.get_cities_of_state("IN", state_code)
+    return sorted(set(city.name for city in cities))
+
+
+INDIA_STATES = get_indian_states()
+
+STATE_CODES = {
+    state.name: state.iso_code
+    for state in INDIA_STATES
+}
+
+STATE_NAMES = list(STATE_CODES.keys())
+
+
 
 st.set_page_config(
     page_title="Blood Connect+",
@@ -15,8 +47,23 @@ st.caption("Connecting donors. Saving lives.")
 
 st.divider()
 
+
 st.header("Donor Registration")
 st.write("Register a donor in the Blood Connect+ database.")
+
+donor_state = st.selectbox(
+    "State",
+    STATE_NAMES,
+    key="donor_state"
+)
+
+donor_city_options = get_indian_cities(STATE_CODES[donor_state])
+
+city = st.selectbox(
+    "City",
+    donor_city_options,
+    key="donor_city"
+)
 
 with st.form("donor_registration"):
 
@@ -38,8 +85,52 @@ with st.form("donor_registration"):
             ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"]
         )
 
-    city = st.text_input("City")
     phone = st.text_input("Phone Number")
+
+    st.subheader("Health Information")
+    st.caption(
+        "Optional self-reported information for authorised "
+        "personnel. This is not a medical eligibility assessment."
+    )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        diabetes = st.selectbox(
+            "Diagnosed with diabetes?",
+            ["Not disclosed", "Yes", "No"]
+        )
+
+        hypertension = st.selectbox(
+            "Diagnosed with hypertension?",
+            ["Not disclosed", "Yes", "No"]
+        )
+
+        heart_condition = st.selectbox(
+            "Known heart condition?",
+            ["Not disclosed", "Yes", "No"]
+        )
+
+    with col2:
+        current_medication = st.selectbox(
+            "Currently taking medication?",
+            ["Not disclosed", "Yes", "No"]
+        )
+
+        recent_illness = st.selectbox(
+            "Recent illness?",
+            ["Not disclosed", "Yes", "No"]
+        )
+
+        recent_surgery = st.selectbox(
+            "Recent surgery?",
+            ["Not disclosed", "Yes", "No"]
+        )
+
+    consent = st.checkbox(
+        "I consent to storing this information "
+        "and sharing it with authorised personnel."
+    )
 
     submitted = st.form_submit_button(
         "Register Donor",
@@ -49,35 +140,77 @@ with st.form("donor_registration"):
     if submitted:
 
         if not name.strip() or not city.strip() or not phone.strip():
-            st.warning("Please fill in all fields.")
+            st.warning("Please fill in all required fields.")
+
+        elif not consent:
+            st.warning("Consent is required to store health information.")
 
         else:
             conn = None
+            cursor = None
 
             try:
                 conn = get_connection()
                 cursor = conn.cursor()
 
+                # Register donor
                 cursor.execute(
                     """
                     INSERT INTO donors
-                    (name, age, blood_group, city, phone)
-                    VALUES (%s, %s, %s, %s, %s)
+                    (name, age, blood_group, city, state, phone)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING donor_id
                     """,
                     (
                         name.strip(),
                         age,
                         blood_group,
                         city.strip(),
+                        donor_state,
                         phone.strip()
+                    )
+                )
+
+                donor_id = cursor.fetchone()[0]
+
+                # Store health information
+                def to_bool(value):
+                    if value == "Yes":
+                        return True
+                    elif value == "No":
+                        return False
+                    return None
+
+                cursor.execute(
+                    """
+                    INSERT INTO donor_health_screening
+                    (
+                        donor_id,
+                        diabetes,
+                        hypertension,
+                        heart_condition,
+                        current_medication,
+                        recent_illness,
+                        recent_surgery,
+                        consent_to_share
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        donor_id,
+                        to_bool(diabetes),
+                        to_bool(hypertension),
+                        to_bool(heart_condition),
+                        to_bool(current_medication),
+                        to_bool(recent_illness),
+                        to_bool(recent_surgery),
+                        consent
                     )
                 )
 
                 conn.commit()
 
                 st.success("Donor registered successfully!")
-
-                cursor.close()
 
             except Exception as e:
                 if conn:
@@ -87,31 +220,75 @@ with st.form("donor_registration"):
                 st.code(str(e))
 
             finally:
+                if cursor:
+                    cursor.close()
                 if conn:
                     conn.close()
+
 
 st.divider()
 
 st.header("🩸 Registered Donors")
 
 try:
-    conn = get_connection()
-
     query = """
         SELECT
-            donor_id,
-            name,
-            age,
-            blood_group,
-            city,
-            available
-        FROM donors
-        ORDER BY created_at DESC
+            d.donor_id,
+            d.name,
+            d.age,
+            d.blood_group,
+            d.city,
+            d.state,
+            d.available,
+
+            CASE
+                WHEN h.diabetes IS NULL THEN 'Not disclosed'
+                WHEN h.diabetes THEN 'Yes'
+                ELSE 'No'
+            END AS diabetes,
+
+            CASE
+                WHEN h.hypertension IS NULL THEN 'Not disclosed'
+                WHEN h.hypertension THEN 'Yes'
+                ELSE 'No'
+            END AS hypertension,
+
+            CASE
+                WHEN h.heart_condition IS NULL THEN 'Not disclosed'
+                WHEN h.heart_condition THEN 'Yes'
+                ELSE 'No'
+            END AS heart_condition,
+
+            CASE
+                WHEN h.current_medication IS NULL THEN 'Not disclosed'
+                WHEN h.current_medication THEN 'Yes'
+                ELSE 'No'
+            END AS current_medication,
+
+            CASE
+                WHEN h.recent_illness IS NULL THEN 'Not disclosed'
+                WHEN h.recent_illness THEN 'Yes'
+                ELSE 'No'
+            END AS recent_illness,
+
+            CASE
+                WHEN h.recent_surgery IS NULL THEN 'Not disclosed'
+                WHEN h.recent_surgery THEN 'Yes'
+                ELSE 'No'
+            END AS recent_surgery
+
+        FROM donors d
+        LEFT JOIN donor_health_screening h
+            ON d.donor_id = h.donor_id
+
+        ORDER BY d.created_at DESC
     """
 
-    df = pd.read_sql_query(query, conn)
-
-    conn.close()
+    engine = get_engine()
+    try:
+        df = pd.read_sql_query(query, engine)
+    finally:
+        engine.dispose()
 
     if df.empty:
         st.info("No donors registered yet.")
@@ -121,11 +298,37 @@ try:
 
         search = st.text_input("Search donors by name or city")
 
+        
         if search:
             df = df[
                 df["name"].str.contains(search, case=False, na=False)
                 | df["city"].str.contains(search, case=False, na=False)
+                | df["state"].str.contains(search, case=False, na=False)
             ]
+
+        st.subheader("Filter by Health Information")
+
+        health_columns = {
+            "Diabetes": "diabetes",
+            "Hypertension": "hypertension",
+            "Heart Condition": "heart_condition",
+            "Current Medication": "current_medication",
+            "Recent Illness": "recent_illness",
+            "Recent Surgery": "recent_surgery"
+        }
+
+        col1, col2, col3 = st.columns(3)
+
+        for index, (label, column) in enumerate(health_columns.items()):
+            with [col1, col2, col3][index % 3]:
+                selected = st.selectbox(
+                    label,
+                    ["All", "Yes", "No", "Not disclosed"],
+                    key=f"filter_{column}"
+                )
+
+                if selected != "All":
+                    df = df[df[column] == selected]
 
         st.dataframe(
             df,
@@ -133,14 +336,30 @@ try:
             hide_index=True
         )
 
+
 except Exception as e:
     st.error("Could not retrieve donor records.")
     st.code(str(e))
+
 
 st.divider()
 
 st.header("🩸 Request Blood")
 st.write("Submit a blood requirement.")
+
+request_state = st.selectbox(
+    "State",
+    STATE_NAMES,
+    key="request_state"
+)
+
+request_city_options = get_indian_cities(STATE_CODES[request_state])
+
+request_city = st.selectbox(
+    "City",
+    request_city_options,
+    key="request_city"
+)
 
 with st.form("blood_request_form"):
 
@@ -164,7 +383,6 @@ with st.form("blood_request_form"):
         )
 
     hospital = st.text_input("Hospital Name")
-    request_city = st.text_input("City")
 
     urgency = st.selectbox(
         "Urgency",
@@ -192,8 +410,8 @@ with st.form("blood_request_form"):
                     """
                     INSERT INTO blood_requests
                     (requester_name, blood_group, units,
-                     hospital_name, city, urgency)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                     hospital_name, city, state, urgency)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     RETURNING request_id
                     """,
                     (
@@ -202,6 +420,7 @@ with st.form("blood_request_form"):
                         units,
                         hospital.strip(),
                         request_city.strip(),
+                        request_state,
                         urgency
                     )
                 )
@@ -232,10 +451,7 @@ st.divider()
 st.header("📋 Blood Requests")
 
 try:
-    conn = get_connection()
-
-    requests_df = pd.read_sql_query(
-        """
+    requests_query = """
         SELECT
             request_id,
             requester_name,
@@ -243,16 +459,19 @@ try:
             units,
             hospital_name,
             city,
+            state,
             urgency,
             status,
             created_at
         FROM blood_requests
         ORDER BY created_at DESC
-        """,
-        conn
-    )
+    """
 
-    conn.close()
+    engine = get_engine()
+    try:
+        requests_df = pd.read_sql_query(requests_query, engine)
+    finally:
+        engine.dispose()
 
     if requests_df.empty:
         st.info("No blood requests yet.")
@@ -274,25 +493,28 @@ st.divider()
 st.header("🔍 Find Matching Donors")
 
 try:
-    conn = get_connection()
-
-    requests_df = pd.read_sql_query(
-        """
-        SELECT request_id, requester_name, blood_group, city
+    pending_query = """
+        SELECT request_id, requester_name, blood_group, city, state
         FROM blood_requests
         WHERE status = 'Pending'
         ORDER BY created_at DESC
-        """,
-        conn
-    )
+    """
+
+    engine = get_engine()
+    try:
+        requests_df = pd.read_sql_query(pending_query, engine)
+    finally:
+        engine.dispose()
 
     if requests_df.empty:
         st.info("No pending requests available.")
 
     else:
+        conn = get_connection()
+
         request_options = {
             f"#{row.request_id} | {row.requester_name} | "
-            f"{row.blood_group} | {row.city}": row.request_id
+            f"{row.blood_group} | {row.city}, {row.state}": row.request_id
             for row in requests_df.itertuples()
         }
 
@@ -315,7 +537,8 @@ try:
                         "Donor ID",
                         "Name",
                         "Blood Group",
-                        "City"
+                        "City",
+                        "State"
                     ]
                 )
 
@@ -328,9 +551,12 @@ try:
             else:
                 st.warning("No matching donors found.")
 
-    conn.close()
+        if 'conn' in locals() and conn is not None:
+            conn.close()
 
 except Exception as e:
+    if 'conn' in locals() and conn is not None:
+        conn.close()
     st.error("Matching operation failed.")
     st.code(str(e))
 
@@ -341,18 +567,17 @@ st.divider()
 st.header("📊 Blood Demand Analysis")
 
 try:
-    conn = get_connection()
-
-    demand_df = pd.read_sql_query(
-        """
-        SELECT blood_group, city, urgency, created_at
+    demand_query = """
+        SELECT blood_group, city, state, urgency, created_at
         FROM blood_requests
         ORDER BY created_at
-        """,
-        conn
-    )
+    """
 
-    conn.close()
+    engine = get_engine()
+    try:
+        demand_df = pd.read_sql_query(demand_query, engine)
+    finally:
+        engine.dispose()
 
     if demand_df.empty:
         st.info("No request data available for analysis.")
