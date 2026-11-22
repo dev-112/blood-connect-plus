@@ -66,7 +66,7 @@ Blood-Connect/
 ### 1. Clone the repository
 
 ```bash
-git clone <repository-url>
+git clone <https://github.com/dev-112/blood-connect-plus>
 cd Blood-Connect
 ```
 
